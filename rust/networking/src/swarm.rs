@@ -17,14 +17,25 @@ pub const OVERRIDE_VERSION_ENV_VAR: &str = "EXO_LIBP2P_NAMESPACE";
 
 /// Create and configure a swarm which listens to all ports on OS
 pub fn create_swarm(keypair: identity::Keypair) -> alias::AnyResult<Swarm> {
-    let mut swarm = SwarmBuilder::with_existing_identity(keypair)
+    log::debug!("create_swarm: building transport");
+    let builder = SwarmBuilder::with_existing_identity(keypair)
         .with_tokio()
-        .with_other_transport(tcp_transport)?
-        .with_behaviour(Behaviour::new)?
-        .build();
+        .with_other_transport(tcp_transport)
+        .map_err(|e| -> alias::AnyError { format!("transport error: {e}").into() })?;
+    log::debug!("create_swarm: building behaviour");
+    let builder = builder
+        .with_behaviour(Behaviour::new)
+        .map_err(|e| -> alias::AnyError { format!("behaviour error: {e}").into() })?;
+    log::debug!("create_swarm: building swarm");
+    let mut swarm = builder.build();
 
-    // Listen on all interfaces and whatever port the OS assigns
-    swarm.listen_on("/ip4/0.0.0.0/tcp/0".parse()?)?;
+    // Listen on loopback with an OS-assigned port.
+    // We use 127.0.0.1 instead of 0.0.0.0 to avoid an IfWatcher (netlink) call
+    // that fails with EACCES on Android/proot kernels.
+    log::debug!("create_swarm: listen_on");
+    swarm.listen_on("/ip4/127.0.0.1/tcp/0".parse()?)
+        .map_err(|e| -> alias::AnyError { format!("listen_on error: {e:?}").into() })?;
+    log::debug!("create_swarm: done");
     Ok(swarm)
 }
 

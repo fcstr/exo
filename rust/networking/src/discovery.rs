@@ -25,6 +25,7 @@ const RETRY_CONNECT_INTERVAL: Duration = Duration::from_secs(5);
 
 mod managed {
     use libp2p::swarm::NetworkBehaviour;
+    use libp2p::swarm::behaviour::toggle::Toggle;
     use libp2p::{identity, mdns, ping};
     use std::io;
     use std::time::Duration;
@@ -36,20 +37,20 @@ mod managed {
 
     #[derive(NetworkBehaviour)]
     pub struct Behaviour {
-        mdns: mdns::tokio::Behaviour,
+        mdns: Toggle<mdns::tokio::Behaviour>,
         ping: ping::Behaviour,
     }
 
     impl Behaviour {
         pub fn new(keypair: &identity::Keypair) -> io::Result<Self> {
             Ok(Self {
-                mdns: mdns_behaviour(keypair)?,
+                mdns: Toggle::from(mdns_behaviour(keypair)),
                 ping: ping_behaviour(),
             })
         }
     }
 
-    fn mdns_behaviour(keypair: &identity::Keypair) -> io::Result<mdns::tokio::Behaviour> {
+    fn mdns_behaviour(keypair: &identity::Keypair) -> Option<mdns::tokio::Behaviour> {
         use mdns::{Config, tokio};
 
         // mDNS config => enable IPv6
@@ -61,8 +62,13 @@ mod managed {
             ..Default::default()
         };
 
-        let mdns_behaviour = tokio::Behaviour::new(mdns_config, keypair.public().to_peer_id());
-        Ok(mdns_behaviour?)
+        match tokio::Behaviour::new(mdns_config, keypair.public().to_peer_id()) {
+            Ok(b) => Some(b),
+            Err(e) => {
+                log::warn!("mDNS discovery unavailable (peer discovery disabled): {e}");
+                None
+            }
+        }
     }
 
     fn ping_behaviour() -> ping::Behaviour {
