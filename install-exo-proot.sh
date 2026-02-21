@@ -11,15 +11,17 @@
 #   bash <(curl -sSL <raw-script-url>)
 #
 # What this script does:
-#   1. Installs system packages (build-essential, curl, git, nodejs, npm)
-#   2. Installs uv (Python package/project manager)
-#   3. Installs Rust via rustup (needed to compile exo_pyo3_bindings via maturin)
-#   4. Clones exo from GitHub
-#   5. Applies two Android/proot-specific patches to the Rust networking layer
-#   6. Runs `uv sync` to build everything (Python + Rust)
-#   7. Builds the Svelte dashboard with /usr/bin/npm (proot node, not Termux node)
-#   8. Appends required environment variables to ~/.bashrc
-#   9. Installs SSH pubkeys from GitHub (fcstr) and starts sshd on port 2222
+#   1. Installs system packages (build-essential, gcc-12/g++-12, curl, git, nodejs, npm)
+#   2. Sets g++ default to version 12 (mlx JIT is incompatible with GCC 13+)
+#   3. Installs uv (Python package/project manager)
+#   4. Installs Rust via rustup (needed to compile exo_pyo3_bindings via maturin)
+#   5. Clones exo from GitHub
+#   6. Applies two Android/proot-specific patches to the Rust networking layer
+#   7. Runs `uv sync` to build everything (Python + Rust)
+#   8. Creates empty CUDA stub libs so mlx loads on Android (no NVIDIA driver)
+#   9. Builds the Svelte dashboard with /usr/bin/npm (proot node, not Termux node)
+#  10. Appends required environment variables to ~/.bashrc (incl. sshd auto-start)
+#  11. Installs SSH pubkeys from GitHub (fcstr) and starts sshd on port 2222
 
 set -euo pipefail
 
@@ -59,7 +61,17 @@ apt-get install -y --no-install-recommends \
     npm \
     pkg-config \
     libssl-dev \
-    ca-certificates
+    ca-certificates \
+    gcc-12 \
+    g++-12
+
+# mlx's JIT compiler generates C++ that uses 'typedef _Float128' which GCC 13+
+# rejects (it became a built-in type). Force g++ 12 as the system default.
+update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-12 12 2>/dev/null || true
+update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-12 12 2>/dev/null || true
+update-alternatives --set gcc /usr/bin/gcc-12 2>/dev/null || true
+update-alternatives --set g++ /usr/bin/g++-12 2>/dev/null || true
+info "g++ set to $(g++ --version | head -1)"
 
 # Confirm we have proot's node (/usr/bin/node reports linux, not android)
 PROOT_NODE=/usr/bin/node
@@ -249,7 +261,33 @@ info "Running uv sync (this compiles Rust — may take 10-20 min on first run)..
 UV_LINK_MODE=copy uv sync --project "$EXO_DIR"
 
 ###############################################################################
-# 7. Build the dashboard
+# 7. Create CUDA stub libraries
+###############################################################################
+#
+# mlx on Linux links libmlx.so against CUDA shared libraries even for CPU-only
+# inference. On Android there is no NVIDIA GPU driver, so the dynamic linker
+# fails to load libmlx.so. We create minimal empty stub .so files that satisfy
+# the linker. mlx loads, detects no CUDA GPU, and falls back to CPU silently.
+
+STUBS_DIR="$EXO_DIR/android-stubs"
+mkdir -p "$STUBS_DIR"
+
+# One-liner C source — valid empty shared library, exports nothing.
+STUB_SRC="$(mktemp /tmp/stub_XXXXXX.c)"
+echo "/* empty CUDA stub */" > "$STUB_SRC"
+
+for lib in libcuda.so.1 libcublasLt.so.13 libnvrtc.so.13 libcudnn.so.9 libnccl.so.2; do
+    if [[ ! -f "$STUBS_DIR/$lib" ]]; then
+        gcc-12 -shared -fPIC -o "$STUBS_DIR/$lib" "$STUB_SRC" && info "created stub: $lib"
+    else
+        info "stub already exists: $lib"
+    fi
+done
+rm -f "$STUB_SRC"
+info "CUDA stubs created in $STUBS_DIR"
+
+###############################################################################
+# 8. Build the dashboard
 ###############################################################################
 
 DASHBOARD_DIR="$EXO_DIR/dashboard"
@@ -284,11 +322,18 @@ if grep -qF "$EXO_ENV_MARKER" "$BASHRC" 2>/dev/null; then
     info "$HOME/.bashrc already has exo env vars — skipping"
 else
     info "Appending env vars to $BASHRC..."
-    cat >> "$BASHRC" << 'ENVBLOCK'
+    cat >> "$BASHRC" << ENVBLOCK
 
 # exo / proot-android environment
-export PATH="$HOME/.cargo/bin:$PATH"
+export PATH="\$HOME/.cargo/bin:\$PATH"
 export UV_LINK_MODE=copy
+# mlx links against CUDA .so files even for CPU inference; stub libs satisfy
+# the dynamic linker on Android where no NVIDIA driver exists.
+export LD_LIBRARY_PATH="${EXO_DIR}/android-stubs:\$HOME/exo/.venv/lib/python3.13/site-packages/mlx_cuda_13.libs\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}"
+# Auto-start sshd on port 2222 (idempotent)
+if ! pgrep -x sshd > /dev/null 2>&1; then
+    /usr/sbin/sshd -p 2222
+fi
 ENVBLOCK
     info "Env vars appended to $BASHRC"
 fi
@@ -302,7 +347,7 @@ UVENV
 fi
 
 ###############################################################################
-# 9. SSH access (pubkey-only, port 2222)
+# 10. SSH access (pubkey-only, port 2222)
 ###############################################################################
 
 info "Setting up SSH access..."
@@ -347,7 +392,7 @@ echo " exo installed successfully!"
 echo "============================================================"
 echo ""
 echo " To run exo:"
-echo "   source ~/.bashrc"
+echo "   source ~/.bashrc   # sets LD_LIBRARY_PATH and PATH"
 echo "   cd $EXO_DIR"
 echo "   uv run exo"
 echo ""
