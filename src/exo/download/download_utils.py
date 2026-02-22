@@ -239,6 +239,9 @@ def _scan_model_directory(
 
 def is_model_directory_complete(model_dir: Path) -> bool:
     """Check if a model directory contains all required weight files."""
+    # GGUF models: complete if any .gguf file exists
+    if any(model_dir.glob("*.gguf")):
+        return True
     file_list = _scan_model_directory(model_dir, recursive=True)
     return file_list is not None and all(f.size is not None for f in file_list)
 

@@ -15,6 +15,7 @@ class InstanceId(Id):
 class InstanceMeta(str, Enum):
     MlxRing = "MlxRing"
     MlxJaccl = "MlxJaccl"
+    LlamaCpp = "LlamaCpp"
 
 
 class BaseInstance(TaggedModel):
@@ -35,8 +36,13 @@ class MlxJacclInstance(BaseInstance):
     jaccl_coordinators: dict[NodeId, str]
 
 
-# TODO: Single node instance
-Instance = MlxRingInstance | MlxJacclInstance
+class LlamaCppInstance(BaseInstance):
+    """Single-node CPU instance using llama.cpp (GGUF models)."""
+
+    pass
+
+
+Instance = MlxRingInstance | MlxJacclInstance | LlamaCppInstance
 
 
 class BoundInstance(CamelCaseModel):

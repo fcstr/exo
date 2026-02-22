@@ -51,6 +51,7 @@ dev = [
 # cuda = [
 #     "mlx[cuda]==0.26.3",
 # ]
+llamacpp = ["llama-cpp-python>=0.3.0"]
 
 ###
 # workspace configuration

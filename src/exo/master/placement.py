@@ -39,6 +39,7 @@ from exo.shared.types.worker.instances import (
     Instance,
     InstanceId,
     InstanceMeta,
+    LlamaCppInstance,
     MlxJacclInstance,
     MlxRingInstance,
 )
@@ -138,10 +139,17 @@ def place_instance(
     instance_id = InstanceId()
     target_instances = dict(deepcopy(current_instances))
 
-    if len(selected_cycle) == 1:
+    if len(selected_cycle) == 1 and command.instance_meta not in (
+        InstanceMeta.LlamaCpp,
+    ):
         command.instance_meta = InstanceMeta.MlxRing
 
     match command.instance_meta:
+        case InstanceMeta.LlamaCpp:
+            target_instances[instance_id] = LlamaCppInstance(
+                instance_id=instance_id,
+                shard_assignments=shard_assignments,
+            )
         case InstanceMeta.MlxJaccl:
             # TODO(evan): shard assignments should contain information about ranks, this is ugly
             def get_device_rank(node_id: NodeId) -> int:

@@ -1,6 +1,7 @@
 import base64
 import contextlib
 import json
+import os
 import random
 import time
 from collections.abc import AsyncGenerator, Awaitable, Callable, Iterator
@@ -169,6 +170,7 @@ from exo.shared.types.openai_responses import (
 from exo.shared.types.state import State
 from exo.shared.types.worker.downloads import DownloadCompleted
 from exo.shared.types.worker.instances import Instance, InstanceId, InstanceMeta
+from exo.worker.runner.bootstrap import _should_use_llamacpp
 from exo.shared.types.worker.shards import Sharding
 from exo.utils.banner import print_startup_banner
 from exo.utils.channels import Receiver, Sender, channel
@@ -443,7 +445,7 @@ class API:
             ) from exc
         instance_combinations: list[tuple[Sharding, InstanceMeta, int]] = []
         for sharding in (Sharding.Pipeline, Sharding.Tensor):
-            for instance_meta in (InstanceMeta.MlxRing, InstanceMeta.MlxJaccl):
+            for instance_meta in (InstanceMeta.MlxRing, InstanceMeta.MlxJaccl, InstanceMeta.LlamaCpp):
                 instance_combinations.extend(
                     [
                         (sharding, instance_meta, i)
@@ -720,18 +722,55 @@ class API:
     async def _resolve_and_validate_text_model(self, model_id: ModelId) -> ModelId:
         """Validate a text model exists and return the resolved model ID.
 
+        On llamacpp platforms, auto-places an instance if none exists.
         Raises HTTPException 404 if no instance is found for the model.
         """
         if not any(
             instance.shard_assignments.model_id == model_id
             for instance in self.state.instances.values()
         ):
-            await self._trigger_notify_user_to_download_model(model_id)
-            raise HTTPException(
-                status_code=404,
-                detail=f"No instance found for model {model_id}",
-            )
+            if _should_use_llamacpp():
+                await self._auto_place_llamacpp_instance(model_id)
+            else:
+                await self._trigger_notify_user_to_download_model(model_id)
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"No instance found for model {model_id}",
+                )
         return model_id
+
+    async def _auto_place_llamacpp_instance(self, model_id: ModelId) -> None:
+        """Auto-place a LlamaCpp instance and wait for it to become ready."""
+        import asyncio
+
+        from exo.shared.types.worker.runners import RunnerReady
+
+        model_card = await ModelCard.load(model_id)
+        command = PlaceInstance(
+            model_card=model_card,
+            sharding=Sharding.Pipeline,
+            instance_meta=InstanceMeta.LlamaCpp,
+            min_nodes=1,
+        )
+        await self._send(command)
+
+        # Wait for the runner to become ready
+        timeout = float(os.environ.get("EXO_MODEL_LOAD_TIMEOUT", "300"))
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            for instance in self.state.instances.values():
+                if instance.shard_assignments.model_id != model_id:
+                    continue
+                for runner_id in instance.shard_assignments.runner_to_shard:
+                    status = self.state.runners.get(runner_id)
+                    if isinstance(status, RunnerReady):
+                        return
+            await asyncio.sleep(0.5)
+
+        raise HTTPException(
+            status_code=503,
+            detail=f"Timed out waiting for model {model_id} to load",
+        )
 
     async def _validate_image_model(self, model: ModelId) -> ModelId:
         """Validate model exists and return resolved model ID.
