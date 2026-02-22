@@ -115,19 +115,33 @@ def main(
                         gguf_path = find_gguf_file(model_path)
 
                     n_ctx = int(os.environ.get("EXO_LLAMACPP_N_CTX", "4096"))
-                    n_threads = os.cpu_count() or 4
+                    cpu_count = os.cpu_count() or 4
+                    n_threads = int(os.environ.get("EXO_LLAMACPP_N_THREADS", str(max(1, cpu_count // 2))))
+                    n_threads_batch = int(os.environ.get("EXO_LLAMACPP_N_THREADS_BATCH", str(cpu_count)))
+                    n_batch = int(os.environ.get("EXO_LLAMACPP_N_BATCH", "512"))
+                    flash_attn = os.environ.get("EXO_LLAMACPP_FLASH_ATTN", "1") == "1"
+                    type_k = int(os.environ.get("EXO_LLAMACPP_TYPE_K", "8"))   # GGML_TYPE_Q8_0
+                    type_v = int(os.environ.get("EXO_LLAMACPP_TYPE_V", "8"))   # GGML_TYPE_Q8_0
 
                     logger.info(
                         f"Loading GGUF model from {gguf_path} "
-                        f"(n_ctx={n_ctx}, n_threads={n_threads})"
+                        f"(n_ctx={n_ctx}, n_threads={n_threads}, n_threads_batch={n_threads_batch}, "
+                        f"n_batch={n_batch}, flash_attn={flash_attn}, type_k={type_k}, type_v={type_v})"
                     )
+                    load_start = time.monotonic()
                     llm = Llama(
                         model_path=str(gguf_path),
                         n_ctx=n_ctx,
                         n_threads=n_threads,
+                        n_threads_batch=n_threads_batch,
+                        n_batch=n_batch,
+                        flash_attn=flash_attn,
+                        type_k=type_k,
+                        type_v=type_v,
+                        use_mmap=True,
                         verbose=False,
                     )  # pyright: ignore[reportUnknownMemberType]
-                    logger.info("llamacpp model loaded")
+                    logger.info(f"llamacpp model loaded in {time.monotonic() - load_start:.1f}s")
                     current_status = RunnerLoaded()
 
                 case StartWarmup() if isinstance(current_status, RunnerLoaded):
@@ -173,6 +187,7 @@ def main(
                         top_p = task_params.top_p or 1.0
 
                         gen_start = time.monotonic()
+                        first_token_time: float | None = None
                         completion_tokens = 0
                         prompt_tokens = 0
 
@@ -194,6 +209,10 @@ def main(
 
                             choices = chunk.get("choices", [])  # pyright: ignore[reportUnknownMemberType]
                             if not choices:  # pyright: ignore[reportUnknownArgumentType]
+                                # Try to capture prompt_tokens from usage in non-choice chunks
+                                chunk_usage = chunk.get("usage")  # pyright: ignore[reportUnknownMemberType]
+                                if chunk_usage:  # pyright: ignore[reportUnknownArgumentType]
+                                    prompt_tokens = chunk_usage.get("prompt_tokens", prompt_tokens)  # pyright: ignore[reportUnknownMemberType]
                                 continue
 
                             choice = choices[0]  # pyright: ignore[reportUnknownVariableType]
@@ -202,6 +221,8 @@ def main(
                             finish_reason_raw = choice.get("finish_reason")  # pyright: ignore[reportUnknownMemberType]
 
                             if content:  # pyright: ignore[reportUnknownArgumentType]
+                                if first_token_time is None:
+                                    first_token_time = time.monotonic()
                                 completion_tokens += 1
 
                             # Map finish_reason
@@ -215,9 +236,18 @@ def main(
                             usage = None
                             stats = None
                             if finish_reason is not None:
-                                elapsed = time.monotonic() - gen_start
+                                now = time.monotonic()
+                                # Prompt TPS: tokens processed before first generated token
+                                prompt_elapsed = (first_token_time or now) - gen_start
+                                prompt_tps = prompt_tokens / prompt_elapsed if prompt_elapsed > 0 and prompt_tokens > 0 else 0.0
+                                # Generation TPS: tokens generated after first token
+                                gen_elapsed = now - (first_token_time or gen_start)
                                 gen_tps = (
-                                    completion_tokens / elapsed if elapsed > 0 else 0.0
+                                    completion_tokens / gen_elapsed if gen_elapsed > 0 else 0.0
+                                )
+                                logger.info(
+                                    f"llamacpp generation done: {prompt_tokens} prompt tokens @ {prompt_tps:.1f} t/s, "
+                                    f"{completion_tokens} tokens @ {gen_tps:.1f} t/s"
                                 )
                                 usage = Usage(
                                     prompt_tokens=prompt_tokens,
@@ -227,7 +257,7 @@ def main(
                                     completion_tokens_details=CompletionTokensDetails(),
                                 )
                                 stats = GenerationStats(
-                                    prompt_tps=0.0,
+                                    prompt_tps=prompt_tps,
                                     generation_tps=gen_tps,
                                     prompt_tokens=prompt_tokens,
                                     generation_tokens=completion_tokens,
