@@ -405,7 +405,7 @@ def get_mlx_ring_hosts_by_node(
 
         for idx, other_node_id in enumerate(selected_cycle):
             if idx == rank:
-                hosts_for_node.append(Host(ip="0.0.0.0", port=ephemeral_port))
+                hosts_for_node.append(Host(ip="127.0.0.1", port=ephemeral_port))
                 continue
 
             if idx not in {left_rank, right_rank}:

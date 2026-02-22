@@ -1,5 +1,6 @@
 """OpenAI Chat Completions API adapter for converting requests/responses."""
 
+import asyncio
 import time
 from collections.abc import AsyncGenerator
 from typing import Any
@@ -135,6 +136,26 @@ def chunk_to_response(
     )
 
 
+async def _with_keepalive(
+    chunk_stream: AsyncGenerator[
+        PrefillProgressChunk | ErrorChunk | ToolCallChunk | TokenChunk, None
+    ],
+    interval: float = 5.0,
+) -> AsyncGenerator[
+    PrefillProgressChunk | ErrorChunk | ToolCallChunk | TokenChunk | None, None
+]:
+    """Wrap a chunk stream to yield None as keepalive when no data arrives within interval."""
+    aiter = chunk_stream.__aiter__()
+    while True:
+        try:
+            chunk = await asyncio.wait_for(aiter.__anext__(), timeout=interval)
+            yield chunk
+        except asyncio.TimeoutError:
+            yield None
+        except StopAsyncIteration:
+            break
+
+
 async def generate_chat_stream(
     command_id: CommandId,
     chunk_stream: AsyncGenerator[
@@ -144,7 +165,10 @@ async def generate_chat_stream(
     """Generate Chat Completions API streaming events from chunks."""
     last_usage: Usage | None = None
 
-    async for chunk in chunk_stream:
+    async for chunk in _with_keepalive(chunk_stream):
+        if chunk is None:
+            yield ": keepalive\n\n"
+            continue
         match chunk:
             case PrefillProgressChunk():
                 # Use SSE comment so third-party clients ignore it
