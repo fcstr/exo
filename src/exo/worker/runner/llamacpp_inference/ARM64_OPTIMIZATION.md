@@ -57,22 +57,35 @@ Common GGML type IDs for reference:
 | 8  | Q8_0 | ~1.1 |
 | 2  | Q4_0 | ~0.6 |
 
-### Batch size
+### Batch / micro-batch size
 
 | Parameter | Default | Env var |
 |-----------|---------|---------|
 | `n_batch` | `512` | `EXO_LLAMACPP_N_BATCH` |
+| `n_ubatch` | `512` | `EXO_LLAMACPP_N_UBATCH` |
 
-Controls the maximum number of tokens processed in a single batch during prompt
-evaluation. 512 is the llama.cpp default and a good balance between memory usage and
-GEMM efficiency. Increase to 1024 or 2048 if you have RAM headroom and long prompts.
+`n_batch` controls the maximum number of tokens processed in a single batch during
+prompt evaluation. `n_ubatch` controls the micro-batch size — the number of tokens
+processed per internal iteration within a batch. Both default to 512, a good balance
+between memory usage and GEMM efficiency. Increase to 1024 or 2048 if you have RAM
+headroom and long prompts.
 
-### Memory mapping
+### Memory mapping and prefetch
 
 | Parameter | Value | Notes |
 |-----------|-------|-------|
 | `use_mmap` | `True` | Maps the GGUF file into memory. Good for proot — lets the OS page in weights on demand and share pages across processes. |
 | `use_mlock` | `False` (default) | proot cannot call `mlock()`. Attempting it would fail silently or error. |
+| `madvise` prefetch | Automatic | Before loading, `MADV_SEQUENTIAL` + `MADV_WILLNEED` are called on the GGUF file to trigger kernel read-ahead into page cache, reducing page-fault stalls during model init. |
+
+### CPU affinity (big.LITTLE)
+
+On ARM big.LITTLE SoCs (common in Android phones), the runner automatically detects
+big vs little cores via `/sys/devices/system/cpu/cpuN/cpufreq/cpuinfo_max_freq` and
+pins itself to the big (high-performance) cores. This prevents the OS scheduler from
+migrating inference threads to power-efficient little cores mid-computation.
+
+Falls back silently if sysfs is unavailable (e.g. proot without `/sys` bind).
 
 ### Context size
 
@@ -210,15 +223,20 @@ CMAKE_ARGS="\
 
 ### Expected impact
 
-| Optimization | Estimated speedup | Effort |
+| Optimization | Estimated speedup | Status |
 |-------------|-------------------|--------|
-| `-mcpu=native` (i8mm/bf16/dotprod) | 1.5-2.0x | Low — just rebuild |
-| Flash attention (already enabled) | 1.2-1.5x decode | Done |
-| KV cache Q8_0 (already enabled) | 1.1-1.3x decode | Done |
-| Thread tuning (already enabled) | 1.1-1.2x | Done |
-| LTO | 1.05-1.15x | Low |
-| jemalloc | 1.05-1.10x | Low |
-| OpenBLAS/ACL | 1.2-1.5x prefill | Medium |
+| `-mcpu=native` (i8mm/bf16/dotprod) | 1.5-2.0x | Done (source build) |
+| Flash attention | 1.2-1.5x decode | Done |
+| KV cache Q8_0 | 1.1-1.3x decode | Done |
+| Thread tuning (decode/prefill split) | 1.1-1.2x | Done |
+| madvise prefetch | Faster cold start | Done |
+| CPU affinity (big.LITTLE pinning) | 1.1-1.3x | Done |
+| n_ubatch tuning | 1.0-1.1x | Done |
+| jemalloc | 1.05-1.10x | Available (LD_PRELOAD) |
+| LTO | 1.05-1.15x | Done (source build) |
+| OpenBLAS/ACL | 1.2-1.5x prefill | Not yet |
 
-The single highest-impact change remaining is rebuilding from source with `-mcpu=native`
-to unlock i8mm integer matrix multiply instructions.
+To use jemalloc at runtime:
+```bash
+LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2 uv run exo
+```

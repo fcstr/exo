@@ -1,6 +1,7 @@
 import gc
 import os
 import time
+from pathlib import Path
 
 from llama_cpp import Llama  # pyright: ignore[reportMissingTypeStubs]
 
@@ -49,6 +50,65 @@ from exo.worker.runner.bootstrap import logger
 from .utils import build_chat_messages, find_gguf_file
 
 
+def _prefetch_file(path: Path) -> None:
+    """Advise the kernel to read-ahead the entire file (MADV_SEQUENTIAL).
+
+    When use_mmap=True, llama.cpp maps the GGUF file. Pre-faulting pages via
+    madvise reduces page-fault stalls during model init on memory-constrained
+    devices (Android/proot).
+    """
+    import mmap as _mmap
+
+    try:
+        fd = os.open(str(path), os.O_RDONLY)
+        try:
+            size = os.fstat(fd).st_size
+            if size == 0:
+                return
+            mm = _mmap.mmap(fd, size, access=_mmap.ACCESS_READ)
+            mm.madvise(_mmap.MADV_SEQUENTIAL)  # pyright: ignore[reportUnknownMemberType]
+            mm.madvise(_mmap.MADV_WILLNEED)  # pyright: ignore[reportUnknownMemberType]
+            mm.close()
+            logger.info(f"prefetched {size / 1024 / 1024:.0f} MB model file into page cache")
+        finally:
+            os.close(fd)
+    except Exception as exc:
+        logger.debug(f"madvise prefetch skipped: {exc}")
+
+
+def _try_pin_big_cores() -> None:
+    """On big.LITTLE ARM SoCs, pin this process to the big (high-perf) cores.
+
+    Reads max frequency from sysfs to identify big cores. Falls back silently
+    if sysfs is unavailable (e.g. proot without /sys bind).
+    """
+    try:
+        cpu_count = os.cpu_count() or 0
+        if cpu_count < 4:
+            return
+
+        freqs: list[tuple[int, int]] = []
+        for cpu_id in range(cpu_count):
+            freq_path = f"/sys/devices/system/cpu/cpu{cpu_id}/cpufreq/cpuinfo_max_freq"
+            try:
+                with open(freq_path) as f:
+                    freqs.append((cpu_id, int(f.read().strip())))
+            except (FileNotFoundError, PermissionError, ValueError):
+                return  # sysfs not available
+
+        if not freqs:
+            return
+
+        max_freq = max(f for _, f in freqs)
+        big_cores = [cpu_id for cpu_id, f in freqs if f == max_freq]
+
+        if len(big_cores) < cpu_count:
+            os.sched_setaffinity(0, big_cores)
+            logger.info(f"pinned to big cores: {big_cores} (max_freq={max_freq})")
+    except Exception as exc:
+        logger.debug(f"CPU affinity pinning skipped: {exc}")
+
+
 def main(
     bound_instance: BoundInstance,
     event_sender: MpSender[Event],
@@ -59,6 +119,7 @@ def main(
     shard_metadata = bound_instance.bound_shard
     model_id = shard_metadata.model_card.model_id
 
+    _try_pin_big_cores()
     logger.info("hello from the llamacpp runner")
 
     setup_start_time = time.time()
@@ -119,14 +180,19 @@ def main(
                     n_threads = int(os.environ.get("EXO_LLAMACPP_N_THREADS", str(max(1, cpu_count // 2))))
                     n_threads_batch = int(os.environ.get("EXO_LLAMACPP_N_THREADS_BATCH", str(cpu_count)))
                     n_batch = int(os.environ.get("EXO_LLAMACPP_N_BATCH", "512"))
+                    n_ubatch = int(os.environ.get("EXO_LLAMACPP_N_UBATCH", "512"))
                     flash_attn = os.environ.get("EXO_LLAMACPP_FLASH_ATTN", "1") == "1"
                     type_k = int(os.environ.get("EXO_LLAMACPP_TYPE_K", "8"))   # GGML_TYPE_Q8_0
                     type_v = int(os.environ.get("EXO_LLAMACPP_TYPE_V", "8"))   # GGML_TYPE_Q8_0
 
+                    # Pre-fetch model file into page cache via madvise
+                    _prefetch_file(gguf_path)
+
                     logger.info(
                         f"Loading GGUF model from {gguf_path} "
                         f"(n_ctx={n_ctx}, n_threads={n_threads}, n_threads_batch={n_threads_batch}, "
-                        f"n_batch={n_batch}, flash_attn={flash_attn}, type_k={type_k}, type_v={type_v})"
+                        f"n_batch={n_batch}, n_ubatch={n_ubatch}, flash_attn={flash_attn}, "
+                        f"type_k={type_k}, type_v={type_v})"
                     )
                     load_start = time.monotonic()
                     llm = Llama(
@@ -135,6 +201,7 @@ def main(
                         n_threads=n_threads,
                         n_threads_batch=n_threads_batch,
                         n_batch=n_batch,
+                        n_ubatch=n_ubatch,
                         flash_attn=flash_attn,
                         type_k=type_k,
                         type_v=type_v,
