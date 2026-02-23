@@ -76,6 +76,31 @@ def _prefetch_file(path: Path) -> None:
         logger.debug(f"madvise prefetch skipped: {exc}")
 
 
+def _spin_up_cpus(duration_ms: int = 200) -> None:
+    """Burn CPU for a short burst to force the governor to ramp to scaling_max.
+
+    On ARM big.LITTLE with the walt/schedutil governor, clocks ramp in response
+    to load. A brief all-core spin before inference ensures clocks are already
+    at peak when the first token is computed, eliminating the ~50-100ms ramp
+    penalty per request.
+    """
+    import threading
+
+    available = _get_available_cpus()
+    deadline = time.monotonic() + duration_ms / 1000.0
+
+    def _spin() -> None:
+        x = 0
+        while time.monotonic() < deadline:
+            x += 1  # noqa: SIM113
+
+    threads = [threading.Thread(target=_spin, daemon=True) for _ in available]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+
 def _get_available_cpus() -> set[int]:
     """Return the set of CPU IDs actually available to this process.
 
@@ -262,6 +287,9 @@ def main(
                     assert llm is not None
 
                     try:
+                        # Spin CPUs to ramp governor to scaling_max before inference
+                        _spin_up_cpus()
+
                         messages = build_chat_messages(task_params)
                         max_tokens = task_params.max_output_tokens or 2048
                         temperature = task_params.temperature or 0.7
