@@ -76,35 +76,48 @@ def _prefetch_file(path: Path) -> None:
         logger.debug(f"madvise prefetch skipped: {exc}")
 
 
+def _get_available_cpus() -> set[int]:
+    """Return the set of CPU IDs actually available to this process.
+
+    Uses sched_getaffinity which respects proot's CPU remapping,
+    unlike os.cpu_count() which may report the host's total.
+    """
+    try:
+        return os.sched_getaffinity(0)
+    except OSError:
+        return set(range(os.cpu_count() or 1))
+
+
 def _try_pin_big_cores() -> None:
     """On big.LITTLE ARM SoCs, pin this process to the big (high-perf) cores.
 
-    Reads max frequency from sysfs to identify big cores. Falls back silently
-    if sysfs is unavailable (e.g. proot without /sys bind).
+    Reads max frequency from sysfs to identify big cores. Uses
+    sched_getaffinity (not cpu_count) to handle proot's CPU remapping
+    where visible CPUs may be non-contiguous (e.g. {0, 1, 5, 6}).
     """
     try:
-        cpu_count = os.cpu_count() or 0
-        if cpu_count < 4:
+        available = _get_available_cpus()
+        if len(available) < 2:
             return
 
         freqs: list[tuple[int, int]] = []
-        for cpu_id in range(cpu_count):
+        for cpu_id in available:
             freq_path = f"/sys/devices/system/cpu/cpu{cpu_id}/cpufreq/cpuinfo_max_freq"
             try:
                 with open(freq_path) as f:
                     freqs.append((cpu_id, int(f.read().strip())))
             except (FileNotFoundError, PermissionError, ValueError):
-                return  # sysfs not available
+                continue
 
         if not freqs:
             return
 
         max_freq = max(f for _, f in freqs)
-        big_cores = [cpu_id for cpu_id, f in freqs if f == max_freq]
+        big_cores = {cpu_id for cpu_id, f in freqs if f == max_freq}
 
-        if len(big_cores) < cpu_count:
+        if big_cores and len(big_cores) < len(available):
             os.sched_setaffinity(0, big_cores)
-            logger.info(f"pinned to big cores: {big_cores} (max_freq={max_freq})")
+            logger.info(f"pinned to big cores: {sorted(big_cores)} (max_freq={max_freq})")
     except Exception as exc:
         logger.debug(f"CPU affinity pinning skipped: {exc}")
 
@@ -176,7 +189,8 @@ def main(
                         gguf_path = find_gguf_file(model_path)
 
                     n_ctx = int(os.environ.get("EXO_LLAMACPP_N_CTX", "4096"))
-                    cpu_count = os.cpu_count() or 4
+                    available_cpus = _get_available_cpus()
+                    cpu_count = len(available_cpus)
                     n_threads = int(os.environ.get("EXO_LLAMACPP_N_THREADS", str(max(1, cpu_count // 2))))
                     n_threads_batch = int(os.environ.get("EXO_LLAMACPP_N_THREADS_BATCH", str(cpu_count)))
                     n_batch = int(os.environ.get("EXO_LLAMACPP_N_BATCH", "512"))
