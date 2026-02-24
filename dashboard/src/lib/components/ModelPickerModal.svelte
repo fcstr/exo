@@ -75,6 +75,7 @@
         macmon_info?: { memory?: { ram_total?: number } };
       }
     >;
+    platform?: string | null;
   };
 
   let {
@@ -96,6 +97,7 @@
     usedMemoryGB,
     downloadsData,
     topologyNodes,
+    platform = null,
   }: ModelPickerModalProps = $props();
 
   // Local state
@@ -183,6 +185,14 @@
   let manualModelId = $state("");
   let addModelError = $state<string | null>(null);
 
+  // GGUF Hub state (separate from MLX)
+  let ggufSearchQuery = $state("");
+  let ggufSearchResults = $state<HuggingFaceModel[]>([]);
+  let ggufTrendingModels = $state<HuggingFaceModel[]>([]);
+  let ggufIsSearching = $state(false);
+  let ggufIsLoadingTrending = $state(false);
+  let ggufSearchDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+
   // Reset transient state when modal opens, but preserve tab selection
   $effect(() => {
     if (isOpen) {
@@ -191,6 +201,10 @@
       showFilters = false;
       manualModelId = "";
       addModelError = null;
+      // Default to GGUF tab on llamacpp platform
+      if (platform === "llamacpp" && selectedFamily === null) {
+        selectedFamily = "huggingface_gguf";
+      }
     }
   });
 
@@ -202,6 +216,17 @@
       !hfIsLoadingTrending
     ) {
       fetchTrendingModels();
+    }
+  });
+
+  // Fetch trending GGUF models when GGUF tab is selected
+  $effect(() => {
+    if (
+      selectedFamily === "huggingface_gguf" &&
+      ggufTrendingModels.length === 0 &&
+      !ggufIsLoadingTrending
+    ) {
+      fetchGgufTrendingModels();
     }
   });
 
@@ -240,6 +265,61 @@
       hfSearchResults = [];
     } finally {
       hfIsSearching = false;
+    }
+  }
+
+  async function fetchGgufTrendingModels() {
+    ggufIsLoadingTrending = true;
+    try {
+      const response = await fetch("/models/search?query=&limit=20&format=gguf");
+      if (response.ok) {
+        ggufTrendingModels = await response.json();
+      }
+    } catch (error) {
+      console.error("Failed to fetch trending GGUF models:", error);
+    } finally {
+      ggufIsLoadingTrending = false;
+    }
+  }
+
+  async function searchGgufModels(query: string) {
+    if (query.length < 2) {
+      ggufSearchResults = [];
+      return;
+    }
+
+    ggufIsSearching = true;
+    try {
+      const response = await fetch(
+        `/models/search?query=${encodeURIComponent(query)}&limit=20&format=gguf`,
+      );
+      if (response.ok) {
+        ggufSearchResults = await response.json();
+      } else {
+        ggufSearchResults = [];
+      }
+    } catch (error) {
+      console.error("Failed to search GGUF models:", error);
+      ggufSearchResults = [];
+    } finally {
+      ggufIsSearching = false;
+    }
+  }
+
+  function handleGgufSearchInput(query: string) {
+    ggufSearchQuery = query;
+    addModelError = null;
+
+    if (ggufSearchDebounceTimer) {
+      clearTimeout(ggufSearchDebounceTimer);
+    }
+
+    if (query.length >= 2) {
+      ggufSearchDebounceTimer = setTimeout(() => {
+        searchGgufModels(query);
+      }, 300);
+    } else {
+      ggufSearchResults = [];
     }
   }
 
@@ -292,6 +372,14 @@
       return hfSearchResults;
     }
     return hfTrendingModels;
+  });
+
+  // Models to display in GGUF view
+  const ggufDisplayModels = $derived.by((): HuggingFaceModel[] => {
+    if (ggufSearchQuery.length >= 2) {
+      return ggufSearchResults;
+    }
+    return ggufTrendingModels;
   });
 
   // Group models by base_model
@@ -389,12 +477,23 @@
   const filteredGroups = $derived.by((): ModelGroup[] => {
     let result: ModelGroup[] = [...groupedModels];
 
+    // On llamacpp platform, hide all MLX models — only keep GGUF (supports_tensor === false)
+    if (platform === "llamacpp") {
+      result = result
+        .map((g) => ({
+          ...g,
+          variants: g.variants.filter((v) => v.supports_tensor === false),
+        }))
+        .filter((g) => g.variants.length > 0);
+    }
+
     // Filter by family
     if (selectedFamily === "favorites") {
       result = result.filter((g) => favorites.has(g.id));
     } else if (
       selectedFamily &&
       selectedFamily !== "huggingface" &&
+      selectedFamily !== "huggingface_gguf" &&
       selectedFamily !== "recents"
     ) {
       result = result.filter((g) => g.family === selectedFamily);
@@ -571,10 +670,10 @@
     <div
       class="flex items-center gap-2 p-3 border-b border-exo-yellow/10 bg-exo-medium-gray/30"
     >
-      {#if selectedFamily === "huggingface"}
+      {#if selectedFamily === "huggingface" || selectedFamily === "huggingface_gguf"}
         <!-- HuggingFace search -->
         <svg
-          class="w-5 h-5 text-orange-400/60 flex-shrink-0"
+          class="w-5 h-5 {selectedFamily === 'huggingface_gguf' ? 'text-green-400/60' : 'text-orange-400/60'} flex-shrink-0"
           viewBox="0 0 24 24"
           fill="none"
           stroke="currentColor"
@@ -586,14 +685,14 @@
         <input
           type="search"
           class="flex-1 bg-transparent border-none outline-none text-sm font-mono text-white placeholder-white/40"
-          placeholder="Search mlx-community models..."
-          value={hfSearchQuery}
-          oninput={(e) => handleHfSearchInput(e.currentTarget.value)}
+          placeholder={selectedFamily === "huggingface_gguf" ? "Search GGUF models..." : "Search mlx-community models..."}
+          value={selectedFamily === "huggingface_gguf" ? ggufSearchQuery : hfSearchQuery}
+          oninput={(e) => selectedFamily === "huggingface_gguf" ? handleGgufSearchInput(e.currentTarget.value) : handleHfSearchInput(e.currentTarget.value)}
         />
-        {#if hfIsSearching}
+        {#if (selectedFamily === "huggingface_gguf" ? ggufIsSearching : hfIsSearching)}
           <div class="flex-shrink-0">
             <span
-              class="w-4 h-4 border-2 border-orange-400 border-t-transparent rounded-full animate-spin block"
+              class="w-4 h-4 border-2 {selectedFamily === 'huggingface_gguf' ? 'border-green-400' : 'border-orange-400'} border-t-transparent rounded-full animate-spin block"
             ></span>
           </div>
         {/if}
@@ -671,20 +770,29 @@
         {hasFavorites}
         hasRecents={hasRecentsTab}
         onSelect={(family) => (selectedFamily = family)}
+        {platform}
       />
 
       <!-- Model list -->
       <div class="flex-1 overflow-y-auto scrollbar-hide flex flex-col">
-        {#if selectedFamily === "huggingface"}
+        {#if selectedFamily === "huggingface" || selectedFamily === "huggingface_gguf"}
           <!-- HuggingFace Hub view -->
+          {@const isGgufSearch = selectedFamily === "huggingface_gguf"}
+          {@const currentSearchQuery = isGgufSearch ? ggufSearchQuery : hfSearchQuery}
+          {@const currentDisplayModels = isGgufSearch ? ggufDisplayModels : hfDisplayModels}
+          {@const isLoadingTrending = isGgufSearch ? ggufIsLoadingTrending : hfIsLoadingTrending}
+          {@const trendingModels = isGgufSearch ? ggufTrendingModels : hfTrendingModels}
+          {@const accentColor = isGgufSearch ? "green" : "orange"}
           <div class="flex-1 flex flex-col min-h-0">
             <!-- Section header -->
             <div
               class="sticky top-0 z-10 px-3 py-2 bg-exo-dark-gray/95 border-b border-exo-yellow/10"
             >
               <span class="text-xs font-mono text-white/40">
-                {#if hfSearchQuery.length >= 2}
-                  Search results for "{hfSearchQuery}"
+                {#if currentSearchQuery.length >= 2}
+                  Search results for "{currentSearchQuery}"
+                {:else if isGgufSearch}
+                  Trending GGUF models
                 {:else}
                   Trending on mlx-community
                 {/if}
@@ -693,18 +801,18 @@
 
             <!-- Results list -->
             <div class="flex-1 overflow-y-auto scrollbar-hide">
-              {#if hfIsLoadingTrending && hfTrendingModels.length === 0}
+              {#if isLoadingTrending && trendingModels.length === 0}
                 <div
                   class="flex items-center justify-center py-12 text-white/40"
                 >
                   <span
-                    class="w-5 h-5 border-2 border-orange-400 border-t-transparent rounded-full animate-spin mr-2"
+                    class="w-5 h-5 border-2 {isGgufSearch ? 'border-green-400' : 'border-orange-400'} border-t-transparent rounded-full animate-spin mr-2"
                   ></span>
                   <span class="font-mono text-sm"
                     >Loading trending models...</span
                   >
                 </div>
-              {:else if hfDisplayModels.length === 0}
+              {:else if currentDisplayModels.length === 0}
                 <div
                   class="flex flex-col items-center justify-center py-12 text-white/40"
                 >
@@ -718,14 +826,14 @@
                     />
                   </svg>
                   <p class="font-mono text-sm">No models found</p>
-                  {#if hfSearchQuery}
+                  {#if currentSearchQuery}
                     <p class="font-mono text-xs mt-1">
                       Try a different search term
                     </p>
                   {/if}
                 </div>
               {:else}
-                {#each hfDisplayModels as model}
+                {#each currentDisplayModels as model}
                   <HuggingFaceResultItem
                     {model}
                     isAdded={existingModelIds.has(model.id)}
@@ -770,7 +878,7 @@
                   type="button"
                   onclick={handleAddManualModel}
                   disabled={!manualModelId.trim() || addingModelId !== null}
-                  class="px-3 py-1.5 text-xs font-mono tracking-wider uppercase bg-orange-500/10 text-orange-400 border border-orange-400/30 hover:bg-orange-500/20 transition-colors rounded disabled:opacity-50 disabled:cursor-not-allowed"
+                  class="px-3 py-1.5 text-xs font-mono tracking-wider uppercase {isGgufSearch ? 'bg-green-500/10 text-green-400 border border-green-400/30 hover:bg-green-500/20' : 'bg-orange-500/10 text-orange-400 border border-orange-400/30 hover:bg-orange-500/20'} transition-colors rounded disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   Add
                 </button>

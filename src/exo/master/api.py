@@ -305,6 +305,7 @@ class API:
         self.app.get("/instance/previews")(self.get_placement_previews)
         self.app.get("/instance/{instance_id}")(self.get_instance)
         self.app.delete("/instance/{instance_id}")(self.delete_instance)
+        self.app.get("/platform")(self.get_platform)
         self.app.get("/models")(self.get_models)
         self.app.get("/v1/models")(self.get_models)
         self.app.post("/models/add")(self.add_custom_model)
@@ -1535,6 +1536,10 @@ class API:
 
         return total_available
 
+    async def get_platform(self) -> dict[str, str]:
+        """Returns the active inference engine for this platform."""
+        return {"inference_engine": "llamacpp" if _should_use_llamacpp() else "mlx"}
+
     async def get_models(self, status: str | None = Query(default=None)) -> ModelList:
         """Returns list of available models, optionally filtered by being downloaded."""
         cards = await get_model_cards()
@@ -1599,17 +1604,25 @@ class API:
         )
 
     async def search_models(
-        self, query: str = "", limit: int = 20
+        self, query: str = "", limit: int = 20, format: str = "mlx"
     ) -> list[HuggingFaceSearchResult]:
-        """Search HuggingFace Hub for mlx-community models."""
+        """Search HuggingFace Hub for models. format='mlx' (default) or 'gguf'."""
         from huggingface_hub import list_models
 
-        results = list_models(
-            search=query or None,
-            author="mlx-community",
-            sort="downloads",
-            limit=limit,
-        )
+        if format == "gguf":
+            results = list_models(
+                search=query or None,
+                filter="gguf",
+                sort="downloads",
+                limit=limit,
+            )
+        else:
+            results = list_models(
+                search=query or None,
+                author="mlx-community",
+                sort="downloads",
+                limit=limit,
+            )
         return [
             HuggingFaceSearchResult(
                 id=m.id,

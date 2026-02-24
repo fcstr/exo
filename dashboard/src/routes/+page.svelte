@@ -228,6 +228,7 @@
       id: string;
       name?: string;
       storage_size_megabytes?: number;
+      supports_tensor?: boolean;
       tasks?: string[];
       hugging_face_id?: string;
       is_custom?: boolean;
@@ -292,7 +293,7 @@
     return model.tasks.includes("ImageToImage");
   }
   let selectedSharding = $state<"Pipeline" | "Tensor">("Pipeline");
-  type InstanceMeta = "MlxRing" | "MlxIbv" | "MlxJaccl";
+  type InstanceMeta = "MlxRing" | "MlxIbv" | "MlxJaccl" | "LlamaCpp";
 
   // Launch defaults persistence
   const LAUNCH_DEFAULTS_KEY = "exo-launch-defaults";
@@ -357,11 +358,28 @@
     }
   }
 
+  let platform = $state<string | null>(null);
   let selectedInstanceType = $state<InstanceMeta>("MlxRing");
   let selectedMinNodes = $state<number>(1);
   let minNodesInitialized = $state(false);
   let launchingModelId = $state<string | null>(null);
   let instanceDownloadExpandedNodes = $state<Set<string>>(new Set());
+
+  // Detect GGUF model (supports_tensor === false means LlamaCpp-only)
+  const isGgufModel = $derived.by(() => {
+    const id = selectedPreviewModelId();
+    if (!id) return false;
+    const model = models.find((m) => m.id === id);
+    return model?.supports_tensor === false;
+  });
+
+  // Auto-select LlamaCpp instance type for GGUF models
+  $effect(() => {
+    if (isGgufModel) {
+      selectedInstanceType = "LlamaCpp";
+      selectedSharding = "Pipeline";
+    }
+  });
 
   // Model picker modal state
   let isModelPickerOpen = $state(false);
@@ -547,9 +565,11 @@
   }
 
   const matchesSelectedRuntime = (runtime: InstanceMeta): boolean =>
-    selectedInstanceType === "MlxRing"
-      ? runtime === "MlxRing"
-      : runtime === "MlxIbv" || runtime === "MlxJaccl";
+    selectedInstanceType === "LlamaCpp"
+      ? runtime === "LlamaCpp"
+      : selectedInstanceType === "MlxRing"
+        ? runtime === "MlxRing"
+        : runtime === "MlxIbv" || runtime === "MlxJaccl";
 
   // Helper to check if a model can be launched (has valid placement with >= minNodes)
   function canModelFit(modelId: string): boolean {
@@ -695,7 +715,25 @@
   onMount(() => {
     mounted = true;
     fetchModels();
+    fetchPlatform();
   });
+
+  async function fetchPlatform() {
+    try {
+      const response = await fetch("/platform");
+      if (response.ok) {
+        const data = await response.json();
+        platform = data.inference_engine ?? null;
+        if (platform === "llamacpp") {
+          selectedInstanceType = "LlamaCpp";
+          // Filter out MLX models now that we know the platform
+          models = models.filter((m) => m.supports_tensor === false);
+        }
+      }
+    } catch (error) {
+      console.error("Failed to fetch platform:", error);
+    }
+  }
 
   async function fetchModels() {
     try {
@@ -704,6 +742,10 @@
         const data = await response.json();
         // API returns { data: [{ id, name }] } format
         models = data.data || [];
+        // On llamacpp platform, only keep GGUF models
+        if (platform === "llamacpp") {
+          models = models.filter((m) => m.supports_tensor === false);
+        }
         // Restore last launch defaults if available
         const currentNodeCount = topologyData()
           ? Object.keys(topologyData()!.nodes).length
@@ -3193,6 +3235,21 @@
 
             <!-- Configuration Options -->
             <div class="flex-shrink-0 mb-4 space-y-3">
+              {#if isGgufModel || platform === "llamacpp"}
+                <!-- GGUF model or llamacpp platform: show fixed LlamaCpp badge -->
+                <div>
+                  <div class="text-xs text-white/70 font-mono mb-2">
+                    Runtime:
+                  </div>
+                  <div class="flex gap-2">
+                    <span
+                      class="py-2 px-4 text-sm font-mono border rounded bg-transparent text-exo-yellow border-exo-yellow"
+                    >
+                      LLAMA.CPP
+                    </span>
+                  </div>
+                </div>
+              {:else}
               <!-- Sharding -->
               <div>
                 <div class="text-xs text-white/70 font-mono mb-2">
@@ -3298,6 +3355,7 @@
                   </button>
                 </div>
               </div>
+              {/if}
 
               <!-- Minimum Nodes (discrete slider with drag support) -->
               <div>
@@ -3972,4 +4030,5 @@
   usedMemoryGB={clusterMemory().used / (1024 * 1024 * 1024)}
   {downloadsData}
   topologyNodes={data?.nodes}
+  {platform}
 />

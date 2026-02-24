@@ -125,7 +125,10 @@ class ModelCard(CamelCaseModel):
     @staticmethod
     async def fetch_from_hf(model_id: ModelId) -> "ModelCard":
         """Fetches storage size and number of layers for a Hugging Face model, returns Pydantic ModelMeta."""
-        # TODO: failure if files do not exist
+        # Check if this is a GGUF repo first
+        if await _is_gguf_repo(model_id):
+            return await _fetch_gguf_from_hf(model_id)
+
         config_data = await fetch_config_data(model_id)
         num_layers = config_data.layer_count
         mem_size_bytes = await fetch_safetensors_size(model_id)
@@ -237,6 +240,68 @@ async def fetch_config_data(model_id: ModelId) -> ConfigData:
     )
     async with aiofiles.open(config_path, "r") as f:
         return ConfigData.model_validate_json(await f.read())
+
+
+async def _is_gguf_repo(model_id: ModelId) -> bool:
+    """Check if a HuggingFace repo contains GGUF files."""
+    try:
+        info = model_info(model_id)
+        if info.siblings is None:
+            return False
+        return any(
+            s.rfilename.endswith(".gguf") for s in info.siblings
+        )
+    except Exception:
+        return False
+
+
+async def _fetch_gguf_from_hf(model_id: ModelId) -> "ModelCard":
+    """Fetch model card for a GGUF repo from HuggingFace."""
+    info = model_info(model_id)
+    siblings = info.siblings or []
+
+    # Sum all .gguf file sizes; pick the best quant file size as storage_size
+    gguf_files = [
+        s for s in siblings if s.rfilename.endswith(".gguf")
+    ]
+    if not gguf_files:
+        raise ValueError(f"No .gguf files found in {model_id}")
+
+    # Prefer a Q4_K_M file for size estimate, else smallest GGUF
+    from exo.worker.runner.llamacpp_inference.utils import _GGUF_PREFERENCE
+
+    best_file = gguf_files[0]
+    for pref in _GGUF_PREFERENCE:
+        for f in gguf_files:
+            if pref in f.rfilename.lower():
+                best_file = f
+                break
+        else:
+            continue
+        break
+
+    storage_bytes = best_file.size or sum(f.size or 0 for f in gguf_files)
+
+    # Extract quantization from filename
+    quantization = ""
+    fname_lower = best_file.rfilename.lower()
+    for q in ["q2_k", "q3_k_s", "q3_k_m", "q3_k_l", "q4_0", "q4_k_s", "q4_k_m", "q5_0", "q5_k_s", "q5_k_m", "q6_k", "q8_0", "f16", "f32"]:
+        if q in fname_lower:
+            quantization = q.upper()
+            break
+
+    mc = ModelCard(
+        model_id=ModelId(model_id),
+        storage_size=Memory.from_bytes(storage_bytes),
+        n_layers=1,
+        hidden_size=1,
+        supports_tensor=False,
+        tasks=[ModelTask.TextGeneration],
+        quantization=quantization,
+    )
+    await mc.save_to_custom_dir()
+    _card_cache[model_id] = mc
+    return mc
 
 
 async def fetch_safetensors_size(model_id: ModelId) -> Memory:

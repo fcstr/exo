@@ -7,6 +7,7 @@
     hasFavorites: boolean;
     hasRecents: boolean;
     onSelect: (family: string | null) => void;
+    platform?: string | null;
   };
 
   let {
@@ -15,6 +16,7 @@
     hasFavorites,
     hasRecents,
     onSelect,
+    platform = null,
   }: FamilySidebarProps = $props();
 
   // Family display names
@@ -22,6 +24,7 @@
     favorites: "Favorites",
     recents: "Recent",
     huggingface: "Hub",
+    huggingface_gguf: "GGUF",
     llama: "Meta",
     qwen: "Qwen",
     deepseek: "DeepSeek",
@@ -121,26 +124,54 @@
     </button>
   {/if}
 
-  <!-- HuggingFace Hub -->
+  <!-- HuggingFace Hub (MLX) — hidden on llamacpp platform -->
+  {#if platform !== "llamacpp"}
+    <button
+      type="button"
+      onclick={() => onSelect("huggingface")}
+      class="group flex flex-col items-center justify-center p-2 rounded transition-all duration-200 cursor-pointer {selectedFamily ===
+      'huggingface'
+        ? 'bg-orange-500/20 border-l-2 border-orange-400'
+        : 'hover:bg-white/5 border-l-2 border-transparent'}"
+      title="Browse and add MLX models from Hugging Face"
+    >
+      <FamilyLogos
+        family="huggingface"
+        class={selectedFamily === "huggingface"
+          ? "text-orange-400"
+          : "text-white/50 group-hover:text-orange-400/70"}
+      />
+      <span
+        class="text-[9px] font-mono mt-0.5 {selectedFamily === 'huggingface'
+          ? 'text-orange-400'
+          : 'text-white/40 group-hover:text-white/60'}">Hub</span
+      >
+    </button>
+  {/if}
+
+  <!-- HuggingFace Hub (GGUF) -->
   <button
     type="button"
-    onclick={() => onSelect("huggingface")}
+    onclick={() => onSelect("huggingface_gguf")}
     class="group flex flex-col items-center justify-center p-2 rounded transition-all duration-200 cursor-pointer {selectedFamily ===
-    'huggingface'
-      ? 'bg-orange-500/20 border-l-2 border-orange-400'
+    'huggingface_gguf'
+      ? 'bg-green-500/20 border-l-2 border-green-400'
       : 'hover:bg-white/5 border-l-2 border-transparent'}"
-    title="Browse and add models from Hugging Face"
+    title="Browse and add GGUF models from Hugging Face"
   >
-    <FamilyLogos
-      family="huggingface"
-      class={selectedFamily === "huggingface"
-        ? "text-orange-400"
-        : "text-white/50 group-hover:text-orange-400/70"}
-    />
+    <svg
+      class="w-5 h-5 {selectedFamily === 'huggingface_gguf'
+        ? 'text-green-400'
+        : 'text-white/50 group-hover:text-green-400/70'}"
+      viewBox="0 0 24 24"
+      fill="currentColor"
+    >
+      <path d="M20 6h-8l-2-2H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2zm-6 10H8v-2h6v2zm4-4H8v-2h10v2z" />
+    </svg>
     <span
-      class="text-[9px] font-mono mt-0.5 {selectedFamily === 'huggingface'
-        ? 'text-orange-400'
-        : 'text-white/40 group-hover:text-white/60'}">Hub</span
+      class="text-[9px] font-mono mt-0.5 {selectedFamily === 'huggingface_gguf'
+        ? 'text-green-400'
+        : 'text-white/40 group-hover:text-white/60'}">GGUF</span
     >
   </button>
 

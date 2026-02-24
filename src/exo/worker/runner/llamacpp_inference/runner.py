@@ -147,6 +147,34 @@ def _try_pin_big_cores() -> None:
         logger.debug(f"CPU affinity pinning skipped: {exc}")
 
 
+def _warn_cpu_power_limit() -> None:
+    """Warn if the OS is capping CPU frequency below hardware max.
+
+    Compares scaling_max_freq (governor cap) vs cpuinfo_max_freq (hardware max)
+    for each available CPU. Common on Android with Samsung battery power limits.
+    """
+    try:
+        for cpu_id in _get_available_cpus():
+            try:
+                with open(f"/sys/devices/system/cpu/cpu{cpu_id}/cpufreq/scaling_max_freq") as f:
+                    scaling_max = int(f.read().strip())
+                with open(f"/sys/devices/system/cpu/cpu{cpu_id}/cpufreq/cpuinfo_max_freq") as f:
+                    hw_max = int(f.read().strip())
+            except (FileNotFoundError, PermissionError, ValueError):
+                continue
+
+            if hw_max > 0 and scaling_max < hw_max * 0.9:
+                pct = int(scaling_max / hw_max * 100)
+                logger.warning(
+                    f"cpu{cpu_id} frequency capped at {pct}% "
+                    f"({scaling_max // 1000}MHz / {hw_max // 1000}MHz). "
+                    f"Check battery settings — disable CPU/power limit for best performance."
+                )
+                return  # one warning is enough
+    except Exception:
+        pass
+
+
 def main(
     bound_instance: BoundInstance,
     event_sender: MpSender[Event],
@@ -158,6 +186,7 @@ def main(
     model_id = shard_metadata.model_card.model_id
 
     _try_pin_big_cores()
+    _warn_cpu_power_limit()
     logger.info("hello from the llamacpp runner")
 
     setup_start_time = time.time()

@@ -135,10 +135,10 @@ if [[ -d "$EXO_DIR/.git" ]]; then
     info "exo already cloned at $EXO_DIR — pulling latest..."
     git -C "$EXO_DIR" pull --ff-only
 else
-    info "Cloning exo (proot-android branch) from fork..."
-    if git clone --branch proot-android --single-branch \
+    info "Cloning exo (proot-llamacpp branch) from fork..."
+    if git clone --branch proot-llamacpp --single-branch \
             https://github.com/fcstr/exo.git "$EXO_DIR" 2>&1; then
-        info "Cloned from proot-android fork — patches already applied"
+        info "Cloned from proot-llamacpp fork — patches already applied"
     else
         warn "Fork clone failed, falling back to upstream exo..."
         git clone https://github.com/exo-explore/exo.git "$EXO_DIR"
