@@ -11,17 +11,19 @@
 #   bash <(curl -sSL <raw-script-url>)
 #
 # What this script does:
-#   1. Installs system packages (build-essential, gcc-12/g++-12, curl, git, nodejs, npm)
+#   1. Installs system packages (build-essential, gcc-12/g++-12, cmake, curl, git,
+#      nodejs, npm, libopenblas-dev, libjemalloc-dev)
 #   2. Sets g++ default to version 12 (mlx JIT is incompatible with GCC 13+)
 #   3. Installs uv (Python package/project manager)
 #   4. Installs Rust via rustup (needed to compile exo_pyo3_bindings via maturin)
 #   5. Clones exo from GitHub
 #   6. Applies two Android/proot-specific patches to the Rust networking layer
 #   7. Runs `uv sync` to build everything (Python + Rust)
-#   8. Creates empty CUDA stub libs so mlx loads on Android (no NVIDIA driver)
-#   9. Builds the Svelte dashboard with /usr/bin/npm (proot node, not Termux node)
-#  10. Appends required environment variables to ~/.bashrc (incl. sshd auto-start)
-#  11. Installs SSH pubkeys from GitHub (fcstr) and starts sshd on port 2222
+#   8. Builds llama-cpp-python from source with -mcpu=native + OpenBLAS (GGUF inference)
+#   9. Creates empty CUDA stub libs so mlx loads on Android (no NVIDIA driver)
+#  10. Builds the Svelte dashboard with /usr/bin/npm (proot node, not Termux node)
+#  11. Appends required environment variables to ~/.bashrc (incl. jemalloc + sshd)
+#  12. Installs SSH pubkeys from GitHub (fcstr) and starts sshd on port 2222
 
 set -euo pipefail
 
@@ -55,12 +57,15 @@ info "Updating apt and installing system dependencies..."
 apt-get update -qq
 apt-get install -y --no-install-recommends \
     build-essential \
+    cmake \
     curl \
     git \
     nodejs \
     npm \
     pkg-config \
     libssl-dev \
+    libopenblas-dev \
+    libjemalloc-dev \
     ca-certificates \
     gcc-12 \
     g++-12
@@ -261,7 +266,30 @@ info "Running uv sync (this compiles Rust — may take 10-20 min on first run)..
 UV_LINK_MODE=copy uv sync --project "$EXO_DIR"
 
 ###############################################################################
-# 7. Create CUDA stub libraries
+# 7. Build llama-cpp-python from source with ARM64 optimizations + OpenBLAS
+###############################################################################
+#
+# The PyPI wheel is compiled without -mcpu=native, missing hardware acceleration
+# for dotprod, i8mm, bf16 instructions available on modern ARM SoCs (Cortex-X4,
+# A720, etc). Rebuilding from source gives 2-4x speedup on quantized GGUF models.
+# OpenBLAS accelerates matrix ops during prompt processing (prefill).
+
+info "Building llama-cpp-python from source with native ARM optimizations + OpenBLAS..."
+info "(This may take 3-5 minutes on a phone)"
+
+CMAKE_ARGS="-DCMAKE_C_FLAGS='-mcpu=native -O3 -flto' -DCMAKE_CXX_FLAGS='-mcpu=native -O3 -flto' -DGGML_NATIVE=ON -DGGML_BLAS=ON -DGGML_BLAS_VENDOR=OpenBLAS" \
+  FORCE_CMAKE=1 \
+  UV_LINK_MODE=copy \
+  uv pip install --project "$EXO_DIR" \
+    llama-cpp-python==0.3.16 \
+    --no-binary llama-cpp-python \
+    --reinstall \
+    --no-cache
+
+info "llama-cpp-python built successfully with native ARM opts + OpenBLAS"
+
+###############################################################################
+# 8. Create CUDA stub libraries
 ###############################################################################
 #
 # mlx on Linux links libmlx.so against CUDA shared libraries even for CPU-only
@@ -330,6 +358,8 @@ export UV_LINK_MODE=copy
 # mlx links against CUDA .so files even for CPU inference; stub libs satisfy
 # the dynamic linker on Android where no NVIDIA driver exists.
 export LD_LIBRARY_PATH="${EXO_DIR}/android-stubs:\$HOME/exo/.venv/lib/python3.13/site-packages/mlx_cuda_13.libs\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}"
+# jemalloc reduces memory fragmentation under proot's ptrace overhead
+export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2
 # Auto-start sshd on port 2222 (idempotent)
 if ! pgrep -x sshd > /dev/null 2>&1; then
     /usr/sbin/sshd -p 2222
@@ -392,13 +422,21 @@ echo " exo installed successfully!"
 echo "============================================================"
 echo ""
 echo " To run exo:"
-echo "   source ~/.bashrc   # sets LD_LIBRARY_PATH and PATH"
+echo "   source ~/.bashrc   # sets LD_LIBRARY_PATH, LD_PRELOAD, PATH"
 echo "   cd $EXO_DIR"
 echo "   uv run exo"
 echo ""
 echo " API will be available at: http://localhost:52415"
 echo ""
+echo " IMPORTANT — before running, do these in Termux (not proot):"
+echo "   1. termux-wake-lock    # prevent Android killing proot"
+echo "   2. Settings → Apps → Termux → Battery → Unrestricted"
+echo "   3. Disable Samsung battery CPU limit (Settings → Battery)"
+echo ""
 echo " Note: mDNS peer discovery is disabled on Android/proot"
 echo " (netlink multicast blocked by kernel). exo runs as a"
 echo " single node — this is expected and harmless."
+echo ""
+echo " Inference engine: llama-cpp-python (GGUF) with OpenBLAS"
+echo " Built with -mcpu=native for optimal ARM performance."
 echo "============================================================"
