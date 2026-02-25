@@ -344,7 +344,7 @@ info "Dashboard built successfully"
 ###############################################################################
 
 BASHRC="$HOME/.bashrc"
-EXO_ENV_MARKER="# exo / proot-android environment"
+EXO_ENV_MARKER="# exo / proot-llamacpp environment"
 
 if grep -qF "$EXO_ENV_MARKER" "$BASHRC" 2>/dev/null; then
     info "$HOME/.bashrc already has exo env vars — skipping"
@@ -352,7 +352,7 @@ else
     info "Appending env vars to $BASHRC..."
     cat >> "$BASHRC" << ENVBLOCK
 
-# exo / proot-android environment
+# exo / proot-llamacpp environment
 export PATH="\$HOME/.cargo/bin:\$PATH"
 export UV_LINK_MODE=copy
 # mlx links against CUDA .so files even for CPU inference; stub libs satisfy
