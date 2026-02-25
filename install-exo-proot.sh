@@ -60,8 +60,6 @@ apt-get install -y --no-install-recommends \
     cmake \
     curl \
     git \
-    nodejs \
-    npm \
     pkg-config \
     libssl-dev \
     libopenblas-dev \
@@ -69,6 +67,15 @@ apt-get install -y --no-install-recommends \
     ca-certificates \
     gcc-12 \
     g++-12
+
+# Node.js 20 (Debian bookworm ships 18, dashboard needs 20+)
+if [[ "$(/usr/bin/node --version 2>/dev/null)" < "v20" ]] || ! command -v node &>/dev/null; then
+    info "Installing Node.js 20 from NodeSource..."
+    curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+    apt-get install -y nodejs
+else
+    info "Node.js already >= 20: $(/usr/bin/node --version)"
+fi
 
 # mlx's JIT compiler generates C++ that uses 'typedef _Float128' which GCC 13+
 # rejects (it became a built-in type). Force g++ 12 as the system default.
