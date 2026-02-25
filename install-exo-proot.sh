@@ -280,7 +280,7 @@ info "(This may take 3-5 minutes on a phone)"
 CMAKE_ARGS="-DCMAKE_C_FLAGS='-mcpu=native -O3 -flto' -DCMAKE_CXX_FLAGS='-mcpu=native -O3 -flto' -DGGML_NATIVE=ON -DGGML_BLAS=ON -DGGML_BLAS_VENDOR=OpenBLAS" \
   FORCE_CMAKE=1 \
   UV_LINK_MODE=copy \
-  uv pip install --project "$EXO_DIR" \
+  uv pip install --python "$EXO_DIR/.venv/bin/python" \
     llama-cpp-python==0.3.16 \
     --no-binary llama-cpp-python \
     --reinstall \
